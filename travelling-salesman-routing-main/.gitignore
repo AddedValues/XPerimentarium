@@ -1,0 +1,7 @@
+cache/
+
+data/output/*.csv
+
+prototypes/
+
+__pycache__/
