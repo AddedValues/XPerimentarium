@@ -31,8 +31,8 @@ from sklearn.linear_model import LinearRegression
 from sklearn.preprocessing import PolynomialFeatures
 
 
-
-os.chdir(os.path.join(os.getcwd(), 'CoolProp'))
+if 'coolprop' not in os.getcwd().lower():
+    os.chdir(os.path.join(os.getcwd(), 'CoolProp'))
 print(f'curdir: {os.getcwd()}')
 
 # Reference state for CoolProp shall be set to h=200 kJ/kg and s=1 kJ/kgK for saturated liquid at 0°C. (IIR).
@@ -44,19 +44,7 @@ sOfzRef = {refrig: PropsSI('S', 'T', 0.0+TKelvin, 'Q', 0, 'NH3') - 1E3 for refri
 print(f'hOfz: {hOfzRef}')
 print(f'sOfz: {sOfzRef}')
 
-# def is_file_synchronized(file_path: str) -> bool:
-#     """
-#     Check if the file is synchronized to the local machine using Dropbox.
-#     """
-#     dbx = dropbox.Dropbox('YOUR_ACCESS_TOKEN')
-
-#     try:
-#         metadata = dbx.files_get_metadata(file_path)
-#         return metadata.server_modified is not None
-#     except dropbox.exceptions.ApiError as e:
-#         print(f"API error: {e}")
-#         return False
-
+#region Functions
 def calc(TsourceC: float, TdrainC: float, pCond: float, refrig: str) -> list[float]:
     """ \
     Calculate the performance metrics of a heat pump:
@@ -139,18 +127,14 @@ def performPolyFit(degree: int, df: pd.DataFrame, featureNames: list[str]) -> tu
 
     return (score, intercept, coef, model)
 
+#endregion Functions
 
-TcondsC = [60.0, 70.0, 80.0]     # Forward condenser temperature in Celsius for NH3.
-pConds  = [90E5, 100E5, 110E5]   # Forward condenser pressure in Pa for CO2.
-TsourceRefC =  4.0               # Independent of refrigerant, tied to source inlet temperature.
-TdrainRefC  = 40.0               # Independent of refrigerant, tied to district heating return temperature.
+TcondsC = [60.0, 70.0, 80.0, 90.0]      # Forward condenser temperature in Celsius for NH3.
+pConds  = [90E5, 100E5, 110E5, 120E5]   # Forward condenser pressure in Pa for CO2.
+TsourceRefC =  4.0                      # Independent of refrigerant, tied to source inlet temperature.
+TdrainRefC  = 40.0                      # Independent of refrigerant, tied to district heating return temperature.
 
 results: dict[str, pd.DataFrame] = {}  # Key is combination of refrigerant and condenser state (temp. or pressure).
-
-# # DEBUG
-# refrigerants = ['NH3']
-# TcondsC = [60.0]
-# pConds  = [90E5]
 
 for refrig in refrigerants:
     for iCond in range(len(TcondsC)):  # Loops either TcondsC or Pconds
@@ -185,20 +169,38 @@ for refrig in refrigerants:
         dfYield = dfResults.pivot(index='Tsource', columns='Tdrain', values='YieldNormed')
         dfCOP   = dfResults.pivot(index='Tsource', columns='Tdrain', values='COP')
 
-        results[title] = (dfResults, dfYield, dfCOP)
+        results[title] = (refrig, dfResults, dfYield, dfCOP)
 
 # Perform polynomial regression on the yield data.
 # See: https://www.kaggle.com/code/peymankarimi74/simple-multiple-and-polynomial-regression
 # See: https://saturncloud.io/blog/multivariate-polynomial-regression-with-python/
 
 regrs: dict[str, tuple[float, np.ndarray, np.ndarray, LinearRegression]] = {}  # Key is title, Value is tuple of score, intercept, coef, model.
-degree = 2
+degree = 3
 for title in results.keys():
-    dfResults, dfYield, dfCOP = results[title]   # Unpacking.
+    refrig, dfResults, dfYield, dfCOP = results[title]   # Unpacking.
     score, intercept, coef, model = performPolyFit(degree=degree, df=dfResults, featureNames=['Tsource', 'Tdrain'])
     print(f'{title}: score: {score}, coef: {coef}, intercept: {intercept}')
     regrs[title] = (score, intercept, coef, model)
     pass
+
+
+# Comparing yield across all condenser temperatures.
+# Pick a reference value for yield at source temperature of 4.0°C and drain temperature of 40.0°C. and Tcond=70°C using NH3.
+# The yields will be normalized by this reference value.
+
+irow = len(TdrainsC) * TsourcesC.tolist().index(TsourceRefC) + TdrainsC.tolist().index(TdrainRefC)
+dfCompares: dict[str,dict[str,pd.Series]] = {}  # Key is refrigerant, Value is dict with key as title and value as pd.Series.
+for refrig in refrigerants:
+    titles = [title for title in results if results[title][0] == refrig]
+    yieldNom = results[titles[1]][1]['Yield'].iloc[irow]  # Yield at reference state.
+    yields: dict[str, pd.Series] = {title: results[title][1]['Yield'] / yieldNom for title in titles}  # Key is title, Value is Yield-column of dfResults.
+    yields['Tsource'] = dfResults['Tsource']
+    yields['Tdrain'] = dfResults['Tdrain']
+    cols = ['Tsource', 'Tdrain'] + titles
+    dfYields = pd.DataFrame(yields, index=dfResults.index)
+    dfYields = dfYields[cols]
+    dfCompares[refrig] = dfYields
 
 
 # Write the results to Excel files.
@@ -206,12 +208,12 @@ xlApp = xw.App(visible=True, add_book=False)
 wb = xlApp.books.open('HP performance metrics TEMPLATE.xlsx')
 
 for title in results.keys():
-    dfResults, dfYield, dfCOP = results[title]    # Unpacking thermodynamic results.
+    refrig, dfResults, dfYield, dfCOP = results[title]    # Unpacking thermodynamic results.
     score, intercept, coef, model = regrs[title]  # Unpacking regression results.
 
     sh = wb.sheets['Refrig'].copy(name=title)
     pCond = dfResults['pCond'].iloc[0]
-    sh.range('B1').value = title[:3]
+    sh.range('B1').value = refrig
     sh.range('B2').value = TsourceRefC
     sh.range('B3').value = TdrainRefC
     sh.range('B4').value = pCond / 1E5
@@ -224,7 +226,15 @@ for title in results.keys():
     sh.range('A30').value = dfCOP
     sh.range('A50').value = dfResults
 
+# Writing yield comparisons across all condenser states for each refrigerant.
+sh = wb.sheets['YieldComparison']
+for i, refrig in enumerate(refrigerants):
+    dfYields = dfCompares[refrig]
+    icol = 1 + i * (len(TcondsC) + 4) # One spacing column.
+    sh.range((10,icol)).value = dfYields
 
+wb.sheets['Refrig'].delete()  # Remove the template sheet.
+wb.sheets[1].activate()
 wb.save(f'HP performance metrics - {degree=}.xlsx')
 wb.close()
 xlApp.quit()
